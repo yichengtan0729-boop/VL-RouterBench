@@ -1,0 +1,17 @@
+# Auto-detect text files and normalize LF
+* text=auto eol=lf
+
+# Treat common binary artifacts as binary
+*.parquet binary
+*.npz binary
+*.npy binary
+*.pkl binary
+*.pt binary
+*.ckpt binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+
+
