@@ -4,14 +4,12 @@
   <img src="assets/icon.png" width="220" alt="VL-RouterBench logo" />
 </p>
 
-## VL-RouterBench
-
 ### VL-RouterBench: A Benchmark for Vision–Language Model Routing
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](requirements.txt)
-[![Paper](https://img.shields.io/badge/Paper-Coming%20Soon-red.svg)](#citation)
-[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Dataset-yellow.svg)](https://huggingface.co/datasets/NPULH/OpenRouterBench)
+[![arXiv](https://img.shields.io/badge/arXiv-2512.23562-red.svg)](https://arxiv.org/abs/2512.23562)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Dataset-yellow.svg)](https://huggingface.co/datasets/KinghtH/VL-RouterBench)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](requirements.txt)
 
 </div>
 
@@ -23,14 +21,17 @@ This repository provides a clean, reproducible implementation of **VL-RouterBenc
 
 ---
 
-## 🌟 Highlights
+## 🌟 VL-RouterBench — a VLM routing benchmark
 
-- **End-to-end pipeline (Steps 1–6)**: build a routing benchmark from VLMEvalKit outputs, compute token statistics, construct quality/cost matrices, extract embeddings, and evaluate baselines.
-- **Cost-aware evaluation**: supports RouterArena-style **Rank Score** that combines accuracy and (token-based) cost.
-- **Two router families (paper-aligned)**:
-  - **Feature-level routers** (train on pre-extracted embeddings; no end-to-end VLM finetuning): `knn`, `prknn`, `ovr`, `kmeans`, `linear`, `mlp`
-  - **End-to-end routers** (train directly from text+image): `cosinecls`, `routerdc`, `zooter`, `vlc`
-- **Config-driven model/dataset pools**: see `config/models.yaml`, `config/datasets.yaml`, `config/pricing.yaml`.
+- VL-RouterBench as the **first unified benchmark tailored to multimodal VLM routing**.
+- Datasets (14 total) grouped into 3 task families: **General, STEM, Charts OCR**.
+- **15 open-source + 2 API models (GPT-4o and Gemini-Flash-2.5)**, spanning roughly **1B** to **78B** parameters, selected to reflect a realistic quality–cost–latency trade space.
+- **30,540 samples**, **519,180** sample–model inference records, and **~34.5M** total tokens (input+output), constructed from VLM inference/scoring artifacts (VLMEvalKit logs).
+- The derived **Accuracy–cost-aware soft labels** allocates probability mass only to correct models, smoothly interpolating from accuracy-only ($\lambda=0$) to “cheapest correct model” ($\lambda\rightarrow\infty$).
+- Two Router architecture paradigms: 
+  - **Feature-level routers**: frozen text+image encoders + lightweight classifier/fusion.
+  - **End-to-end routers**: fine-tune multimodal backbones to directly predict the routed model.
+- Primary metrics: **Average Accuracy**, **Average Cost**, **Rank Score**, and **Throughput (K tokens/s)**.
 
 ---
 
@@ -53,7 +54,19 @@ pip install -r requirements.txt
 
 ## 📦 Data Preparation
 
-VL-RouterBench converts **VLMEvalKit** outputs into a unified routing benchmark.
+VL-RouterBench converts [**VLMEvalKit**](https://github.com/open-compass/VLMEvalKit) outputs into a unified routing benchmark.
+
+To make data setup easier, we provide a pre-packaged archive **`vlm_router_data.tar.gz`** that contains everything needed to run the pipeline. You can download it from any of the following channels and extract it under the repo root:
+
+- **Google Drive**: [vlm_router_data.tar.gz](https://drive.google.com/file/d/1Va18MW8nJqvatxDXQDQq0t9NAqr93hMg/view?usp=sharing)
+- **Baidu Netdisk**: [vlm_router_data.tar.gz](https://pan.baidu.com/s/1D_P8YwY_E5kDA5dUB-ovng) (code: xb1s)
+- **Hugging Face**: [vlm_router_data.tar.gz](https://huggingface.co/datasets/KinghtH/VL-RouterBench)
+
+After downloading, extract it as:
+
+```bash
+tar -xzf vlm_router_data.tar.gz
+```
 
 By default, the pipeline expects the following directories (relative to repo root):
 
@@ -65,13 +78,13 @@ vlm_router_data/
 ```
 
 Notes:
-- **`VLMEvalKit_evaluation/`** is used by Step 1 & 4 (contains correctness signals such as `is_correct`).
+- **`VLMEvalKit_evaluation/`** is used by Step 1 & 4 (contains correctness signals).
 - **`VLMEvalKit_inference/`** is used by Step 2 (extract real model outputs to count output tokens).
-- **`TSV_images/`** is optional. If missing, TSV-based samples will fall back to empty images (still runnable, but image-dependent routers/features may degrade).
+- **`TSV_images/`** is used by routers for training and inference to make routing decisions.
 
 ---
 
-## 🎯 Quick Start (Steps 1–6)
+## 🎯 Quick Start
 
 ### Run everything (recommended)
 
@@ -101,28 +114,9 @@ bash scripts/run_step5_extract_features.sh
 bash scripts/run_step6_evaluate_baselines.sh
 ```
 
-### Run a range of steps
-
-```bash
-# Start from Step 2
-bash scripts/run_all.sh --start-from 2
-
-# End at Step 3
-bash scripts/run_all.sh --end-at 3
-```
-
-### Common path overrides
-
-```bash
-bash scripts/run_all.sh \
-  --output-dir . \
-  --vlmevalkit-eval-dir vlm_router_data/VLMEvalKit_evaluation \
-  --vlmevalkit-infer-dir vlm_router_data/VLMEvalKit_inference
-```
-
 ---
 
-## 📁 Outputs (what you get)
+### 📁 Outputs (what you get)
 
 After Steps 1–6, you will typically see:
 
@@ -134,7 +128,7 @@ reports/token_statistics/       # Step 2: token counts + token-based costs
 data/matrices/                  # Step 3: Y.npz (quality), C.npy (cost), cost_bounds.json
 data/registry/                  # Step 3: meta.parquet, model_index.pkl, ...
 EMBEDDINGS/                     # Step 5: text/ and vision/ embeddings (parquet)
-reports/baselines_evaluation/   # Step 6: baseline summary + per-sample/per-dataset reports
+outputs/baselines_evaluation/   # Step 6: baseline summary + per-sample/per-dataset reports
 ```
 
 ---
@@ -144,10 +138,10 @@ reports/baselines_evaluation/   # Step 6: baseline summary + per-sample/per-data
 ### Baselines (no learning)
 
 Evaluated in Step 6:
+- `Oracle` (upper bound)
 - `StrongestGlobal`
-- `StrongestPerDataset`
 - `CheapestGlobal`
-- `Oracle` (upper bound; uses ground-truth Y/C at test time)
+- `StrongestPerDataset`
 - `RandomRouter`
 
 ### Feature-level routers (train on embeddings)
@@ -172,7 +166,7 @@ These routers train directly from `meta + BENCHMARKS` (text prompts and image as
 Example: train & evaluate VLC router
 
 ```bash
-python routers/vlc/train_and_eval.py --dataset_dir . --model_type visualbert --output_dir outputs/vlc
+python routers/vlc/train_and_eval.py --dataset_dir . --model_type lr --output_dir outputs/vlc
 ```
 
 Additional end-to-end sweeps:
@@ -230,11 +224,14 @@ vl_routerbench_v1/
 If you find this benchmark useful, please cite:
 
 ```bibtex
-@article{vlrouterbench,
-  title   = {VL-RouterBench: A Benchmark for Vision--Language Model Routing},
-  author  = {TODO},
-  year    = {2025},
-  note    = {Coming soon}
+@misc{huang2025vlrouterbenchbenchmarkvisionlanguagemodel,
+      title={VL-RouterBench: A Benchmark for Vision-Language Model Routing}, 
+      author={Zhehao Huang and Baijiong Lin and Jingyuan Zhang and Jingying Wang and Yuhang Liu and Ning Lu and Tao Li and Xiaolin Huang},
+      year={2025},
+      eprint={2512.23562},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2512.23562}, 
 }
 ```
 
