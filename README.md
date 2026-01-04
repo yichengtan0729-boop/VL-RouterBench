@@ -86,6 +86,8 @@ Notes:
 
 ## 🎯 Quick Start
 
+First, we need to convert the output data of VLMEvalKit into the Router Benchmark data.
+
 ### Run everything (recommended)
 
 ```bash
@@ -135,16 +137,22 @@ outputs/baselines_evaluation/   # Step 6: baseline summary + per-sample/per-data
 
 ## 🧠 Routers
 
-### Baselines (no learning)
+### Training-free Baselines
 
-Evaluated in Step 6:
 - `Oracle` (upper bound)
-- `StrongestGlobal`
-- `CheapestGlobal`
-- `StrongestPerDataset`
-- `RandomRouter`
+- `StrongestGlobal` (single model with the highest average accuracy)
+- `CheapestGlobal` (single model with the lowest average cost)
+- `StrongestPerDataset` (highest accuracy per dataset)
+- `RandomRouter` (random select)
 
-### Feature-level routers (train on embeddings)
+Evaluate as in Step 6:
+```
+bash scripts/run_step6_evaluate_baselines.sh
+```
+
+### Feature-level routers
+
+`KNN`, `PRkNN`, `OVR`, `K-means`, `Linear`, `MLP`
 
 These routers use Step 5 embeddings (e.g., `bge-m3` + `dinov2-base`) and optional fusion in `routers/utils/fusion.py`.
 
@@ -154,38 +162,28 @@ Example: train & evaluate Linear router
 python routers/linear/train_and_eval.py --dataset_dir . --output_dir outputs/linear_router
 ```
 
-Hyperparameter sweeps are provided under `scripts/`:
+Evaluation sweeps are provided under `scripts/`:
+- `scripts/train_knn_prknn_ovr_kmeans.sh`
 - `scripts/train_linear_lambda_sweep.sh`
 - `scripts/train_mlp_lambda_sweep.sh`
-- `scripts/train_knn_prknn_ovr_kmeans.sh`
 
-### End-to-end routers (train from text+image)
+### End-to-end routers
+
+`CosineCls`, `RouterDC`, `ZOOTER`, `VLC`
 
 These routers train directly from `meta + BENCHMARKS` (text prompts and image assets), via the unified loader in `routers/utils/benchmarks_data.py`.
 
 Example: train & evaluate VLC router
 
 ```bash
-python routers/vlc/train_and_eval.py --dataset_dir . --model_type lr --output_dir outputs/vlc
+python routers/vlc/train_and_eval.py --dataset_dir . --model_type lxmert --output_dir outputs/vlc
 ```
 
-Additional end-to-end sweeps:
+Evaluation sweeps are provided under `scripts/`:
 - `scripts/train_cosinecls_lambda_sweep.sh`
 - `scripts/train_routerdc_lambda_sweep.sh`
 - `scripts/train_zooter_lambda_sweep.sh`
 - `scripts/train_vlc_lambda_sweep.sh`
-
----
-
-## 📏 Metrics (Rank Score)
-
-We provide a RouterArena-compatible **Rank Score** implementation in `routers/utils/rank_score.py`, which combines:
-- **Accuracy** (higher is better)
-- **Log-normalized cost** using `data/matrices/cost_bounds.json` (cheaper is better)
-
-This is the default metric used in:
-- baseline evaluation (`routers/utils/eval_baselines.py`)
-- optional dev monitoring / early stopping for several routers
 
 ---
 
@@ -194,6 +192,68 @@ This is the default metric used in:
 - `config/datasets.yaml`: dataset pool and split ratios (train/dev/test)
 - `config/models.yaml`: model pool (canonical IDs + aliases)
 - `config/pricing.yaml`: token-based pricing (USD per 1M tokens) and budget points
+
+---
+
+## Datasets
+
+Our benchmark curates **14 datasets** across three task groups—**General**, **STEM**, and **Charts & OCR/Document**—to induce sufficient routability differences while covering diverse real application scenarios. **General** includes *MMBench, MMStar, MMMU, RealWorldQA, InfoVQA,* and *HallusionBench*; **STEM** covers *MathVista, MathVision, MathVerse,* and *AI2D*; and **Charts & OCR/Document** contains *ChartQA, DocVQA, TextVQA,* and *OCRBench*, systematically examining chart reading and integrated OCR capability. The dataset distribution is shown below.
+
+<p align="center">
+  <img src="assets/data_distribution.png" width="300" alt="VL-RouterBench datasets distribution" />
+</p>
+
+---
+
+## Models
+
+Our benchmark includes **17 VLMs** (15 open-source + 2 API models), spanning roughly **1B–78B** parameters, to reflect a realistic quality–cost–latency trade space for routing. For MoE-style models, we use the notation **m-A-n** to denote *mB total parameters* with *nB activated* during inference. Token prices (USD per 1M tokens) are aligned with the estimates in `config/pricing.yaml` (referenced from `Together.ai` pricing by model size).
+
+| Model | Params (B) | Input Price ($/1M tokens) | Output Price ($/1M tokens) |
+|---|---:|---:|---:|
+| Janus-Pro-1B | 1.0 | 0.05 | 0.05 |
+| DeepSeek-VL2-Tiny | 27.0-A-1.0 | 0.05 | 0.05 |
+| SmolVLM2 | 2.2 | 0.06 | 0.06 |
+| Kimi-VL-A3B-Thinking-2506 | 16.0-A-2.8 | 0.20 | 0.25 |
+| Phi-3.5-Vision | 4.2 | 0.10 | 0.10 |
+| DeepSeek-VL2 | 27.0-A-4.5 | 0.35 | 0.50 |
+| Janus-Pro-7B | 7.0 | 0.18 | 0.25 |
+| MiMo-VL-7B-RL | 7.0 | 0.20 | 0.30 |
+| LLaVA-Next-Vicuna-7B | 7.0 | 0.20 | 0.20 |
+| Qianfan-VL-8B | 8.0 | 0.18 | 0.25 |
+| Pixtral-12B | 12.0 | 0.25 | 0.35 |
+| Gemma3-27B | 27.0 | 0.35 | 0.50 |
+| Qwen2.5-VL-32B-Instruct | 32.0 | 0.40 | 0.60 |
+| Qwen2.5-VL-72B-Instruct | 72.0 | 0.80 | 1.20 |
+| InternVL2.5-78B | 78.0 | 1.00 | 1.50 |
+| Gemini-Flash-2.5 | - | 0.30 | 2.40 |
+| GPT-4o | - | 2.50 | 10.00 |
+
+---
+
+## 📏 Metrics
+
+We adopt a multi-dimensional evaluation protocol centered on **accuracy**, **cost**, and **efficiency**. Let the router choose a model for each test sample \(x_i\).
+
+- **Average Accuracy (Avg. Acc.)**: the mean correctness of routed decisions over the test set.
+- **Average Cost (Avg. Cost)**: the mean inference cost of routed decisions over the test set.
+- **Rank Score**: a multi-objective score that harmonically averages **Avg. Acc.** and **log-normalized cost**. Implementation: `routers/utils/rank_score.py`.
+- **Throughput**: system efficiency measured as **tokens/s** (tokens per second).
+
+---
+
+## Main Results and Takeaway Messages
+
+<p align="center">
+  <img src="assets/main_results.png" width="900" alt="VL-RouterBench main results" />
+</p>
+
+### Takeaway Messages
+
+- **(1) Large headroom for routing**: The large **Oracle vs. best single-model** gap indicates that routing can substantially improve cost-effectiveness over any fixed model choice.
+- **(2) Strong routers, but still far from Oracle**: Most routers improve the **accuracy–cost trade-off** beyond the best single-model baseline; **RouterDC** ranks highest among the compared methods, yet all methods remain notably below Oracle—highlighting substantial room for improvement.
+- **(3) Better representations help feature-level routing**: Higher-dimensional text/vision embeddings improve feature-level routers; the **BGE-M3 + SigLIP-L-16** pairing performs best, and simple multimodal fusion via **Normalize-Concat** yields the strongest overall **Rank Score**.
+- **(4) End-to-end vs. feature-level**: End-to-end routers generally achieve better accuracy–cost trade-offs than feature-level routers, but may run at slightly lower throughput due to heavier multimodal backbones (e.g., **LXMERT** performing best among closely matched encoders).
 
 ---
 
@@ -211,17 +271,10 @@ vl_routerbench_v1/
 
 ---
 
-## 🔧 Troubleshooting
-
-- **Step 2 fails with tokenizer/model access issues**: ensure `transformers` can access tokenizers; some models may require a Hugging Face token.
-- **GPU OOM in Step 5**: reduce batch size, e.g. `bash scripts/run_step5_extract_features.sh --batch-size 16` or use CPU `--device cpu`.
-- **TSV images missing**: `TSV_images/` is optional; TSV-based samples will not have real images and image-heavy routers may degrade.
-
----
 
 ## 📝 Citation
 
-If you find this benchmark useful, please cite:
+If you find VL-RouterBench useful, please cite:
 
 ```bibtex
 @misc{huang2025vlrouterbenchbenchmarkvisionlanguagemodel,
@@ -241,6 +294,7 @@ If you find this benchmark useful, please cite:
 
 - VLMEvalKit for providing the underlying VLM evaluation outputs.
 - RouterArena for the Rank Score formulation inspiration.
+- OpenRouterBench for github organization and repository template.
 
 
 
