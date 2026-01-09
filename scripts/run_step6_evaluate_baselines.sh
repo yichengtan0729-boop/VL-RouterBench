@@ -197,7 +197,7 @@ BASELINES_OUT="$(resolve_baselines_output_dir)"
 
 mkdir -p "$BASELINES_OUT"
 
-python "$ROUTERS_DIR/utils/eval_baselines.py" \
+PYTHONPATH="$SCRIPT_DIR/.." python "$ROUTERS_DIR/utils/eval_baselines.py" \
     --dataset_dir "$OUTPUT_DIR" \
     --output_dir "$BASELINES_OUT" \
     --random_seed "$RANDOM_SEED"
