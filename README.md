@@ -58,8 +58,8 @@ VL-RouterBench converts [**VLMEvalKit**](https://github.com/open-compass/VLMEval
 
 To make data setup easier, we provide a pre-packaged archive **`vlm_router_data.tar.gz`** that contains everything needed to run the pipeline. You can download it from any of the following channels and extract it under the repo root:
 
-- **Google Drive**: [vlm_router_data.tar.gz](https://drive.google.com/file/d/1Va18MW8nJqvatxDXQDQq0t9NAqr93hMg/view?usp=sharing)
-- **Baidu Netdisk**: [vlm_router_data.tar.gz](https://pan.baidu.com/s/1D_P8YwY_E5kDA5dUB-ovng) (code: xb1s)
+- **Google Drive**: [vlm_router_data.tar.gz](https://drive.google.com/file/d/1Boy5sAbTJmMeOttCZftu3DtbfXfFa_dE/view?usp=drive_link)
+- **Baidu Netdisk**: [vlm_router_data.tar.gz](https://pan.baidu.com/s/1-rh_EKgFVPujVseB3MWyGA?pwd=8prk) (code: 8prk)
 - **Hugging Face**: [vlm_router_data.tar.gz](https://huggingface.co/datasets/KinghtH/VL-RouterBench)
 
 After downloading, extract it as:
@@ -260,7 +260,7 @@ We adopt a multi-dimensional evaluation protocol centered on **accuracy**, **cos
 ## 🗂️ Project Structure
 
 ```text
-vl_routerbench_v1/
+VL_RouterBench/
   scripts/        # step runners + sweeps
   tools/          # benchmark construction + token stats + matrix building + validation
   routers/        # baselines + feature-level routers + end-to-end routers
