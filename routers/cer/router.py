@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CER-Router: Evidence-Conditioned Risk Routing."""
+"""CER-Router: counterfactual evidence risk and cost-aware routing."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ try:
     from torch.utils.data import DataLoader, Dataset
 
     HAS_TORCH = True
-except ImportError:  # pragma: no cover - depends on runtime env
+except ImportError:  # pragma: no cover - depends on runtime environment
     torch = None
     nn = None
     DataLoader = None
@@ -30,12 +30,7 @@ except Exception:  # pragma: no cover - fallback for isolated imports
     class RouterBase:  # type: ignore[no-redef]
         pass
 
-from routers.cer.features import (
-    QUERY_TYPES,
-    build_model_profiles,
-    build_sample_features,
-    parse_query_type,
-)
+from routers.cer.features import build_model_profiles, build_sample_features
 from routers.cer.metrics import accuracy_cost_summary, normalize_cost_matrix
 
 
@@ -58,7 +53,13 @@ if HAS_TORCH:
     class PairwiseRiskNet(nn.Module):
         """Pairwise risk estimator with model-profile projection."""
 
-        def __init__(self, sample_dim: int, model_dim: int, hidden_dim: int = 512, dropout: float = 0.15):
+        def __init__(
+            self,
+            sample_dim: int,
+            model_dim: int,
+            hidden_dim: int = 512,
+            dropout: float = 0.15,
+        ) -> None:
             super().__init__()
             self.sample_dim = int(sample_dim)
             self.model_dim = int(model_dim)
@@ -90,22 +91,22 @@ if HAS_TORCH:
 else:
 
     class PairwiseRiskNet:  # type: ignore[no-redef]
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, **kwargs) -> None:
             raise ImportError("CER-Router requires PyTorch. Please install torch.")
 
 
 class _PairIndexDataset(Dataset):
     """Dataset of flattened (sample, model) pair ids."""
 
-    def __init__(self, n_samples: int, n_models: int):
+    def __init__(self, n_samples: int, n_models: int) -> None:
         self.n_samples = int(n_samples)
         self.n_models = int(n_models)
         self.n_pairs = self.n_samples * self.n_models
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.n_pairs
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> int:
         return int(idx)
 
 
@@ -131,11 +132,10 @@ def _torch_load_compat(path: str | Path, map_location=None):
 
 class CERRouter(RouterBase):
     """
-    Evidence-Conditioned Risk Router.
+    Evidence-conditioned risk router.
 
-    The model learns R(x, m) = P(model m fails on sample x). Inference routes
-    with argmin_m R(x, m) + lambda_cost * normalized_cost(x, m), and falls back
-    to risk-only routing when no cost matrix is supplied.
+    The model learns failure risk R(x, m). Inference selects the model with
+    the smallest ``risk + lambda_cost * normalized_cost``.
     """
 
     def __init__(
@@ -164,11 +164,16 @@ class CERRouter(RouterBase):
         monitor_metric: str = "rank_score",
         random_state: int = 42,
         verbose: int = 1,
-    ):
+    ) -> None:
         if not HAS_TORCH:
             raise ImportError("CER-Router requires PyTorch. Please install torch.")
         if ablation_mode not in ABLATION_MODES:
             raise ValueError(f"Unknown ablation_mode={ablation_mode}; expected one of {ABLATION_MODES}")
+
+        if pairwise_rank_weight is not None:
+            beta_rank = float(pairwise_rank_weight)
+        if pairwise_rank_margin is not None:
+            rank_margin = float(pairwise_rank_margin)
 
         self.hidden_dim = int(hidden_dim)
         self.dropout = float(dropout)
@@ -177,10 +182,6 @@ class CERRouter(RouterBase):
         self.batch_size = int(batch_size)
         self.epochs = int(epochs)
         self.alpha_brier = float(alpha_brier)
-        if pairwise_rank_weight is not None:
-            beta_rank = float(pairwise_rank_weight)
-        if pairwise_rank_margin is not None:
-            rank_margin = float(pairwise_rank_margin)
         self.beta_rank = float(beta_rank)
         self.rank_margin = float(rank_margin)
         self.rank_pairs_per_sample = int(rank_pairs_per_sample)
@@ -225,7 +226,7 @@ class CERRouter(RouterBase):
     def name(self) -> str:
         return "CER-Router"
 
-    def _set_seed(self):
+    def _set_seed(self) -> None:
         random.seed(self.random_state)
         np.random.seed(self.random_state)
         torch.manual_seed(self.random_state)
@@ -236,7 +237,7 @@ class CERRouter(RouterBase):
         return {
             "include_embeddings": self.ablation_mode != "sample_difficulty_only",
             "include_query_type": self.ablation_mode != "no_query_type",
-            "include_extra_features": self.ablation_mode not in ("no_extra_features",),
+            "include_extra_features": self.ablation_mode != "no_extra_features",
             "random_extra_features": self.ablation_mode == "random_extra_features",
             "random_state": self.random_state,
         }
@@ -256,7 +257,9 @@ class CERRouter(RouterBase):
     def _effective_lambda(self, lambda_cost: Optional[float] = None) -> float:
         if self.ablation_mode == "no_cost":
             return 0.0
-        return float(self.lambda_cost if lambda_cost is None else lambda_cost)
+        if lambda_cost is None:
+            return float(self.lambda_cost)
+        return float(lambda_cost)
 
     def _effective_beta_rank(self) -> float:
         if self.ablation_mode == "no_ranking":
@@ -282,7 +285,13 @@ class CERRouter(RouterBase):
             self.extra_feature_columns = list(extra_columns)
         return features, query_types
 
-    def build_raw_model_profiles(self, Y: np.ndarray, C: np.ndarray, meta=None, query_types=None) -> np.ndarray:
+    def build_raw_model_profiles(
+        self,
+        Y: np.ndarray,
+        C: np.ndarray,
+        meta=None,
+        query_types=None,
+    ) -> np.ndarray:
         return build_model_profiles(
             Y=Y,
             C=C,
@@ -313,15 +322,17 @@ class CERRouter(RouterBase):
             raise ValueError("model_profiles must be a 2D array")
         if self.model_dim is not None and profiles.shape[1] != self.model_dim:
             raise ValueError(f"profile dim mismatch: got {profiles.shape[1]}, expected {self.model_dim}")
+
         if profiles_are_standardized:
             self.model_profiles = profiles.astype(np.float32)
             self.model_profiles_raw = None
         else:
             self.model_profiles_raw = profiles.astype(np.float32)
             self.model_profiles = self._transform_profiles(profiles)
+
         if model_mapping is not None:
             self.model_mapping = dict(model_mapping)
-            self.reverse_mapping = {v: k for k, v in self.model_mapping.items()}
+            self.reverse_mapping = {value: key for key, value in self.model_mapping.items()}
         return self
 
     def fit(
@@ -358,13 +369,22 @@ class CERRouter(RouterBase):
             raise ValueError(f"Y and C must be 2D arrays with the same shape; got {Y.shape} and {C.shape}")
 
         n_samples, n_models = Y.shape
-        self.model_mapping = dict(model_mapping or {i: f"model_{i}" for i in range(n_models)})
-        self.reverse_mapping = {v: k for k, v in self.model_mapping.items()}
-        self.costs = np.asarray(costs, dtype=np.float32) if costs is not None else np.nanmean(C, axis=0).astype(np.float32)
+        self.model_mapping = dict(model_mapping or {idx: f"model_{idx}" for idx in range(n_models)})
+        self.reverse_mapping = {value: key for key, value in self.model_mapping.items()}
+        if costs is not None:
+            self.costs = np.asarray(costs, dtype=np.float32)
+        else:
+            self.costs = np.nanmean(C, axis=0).astype(np.float32)
 
         finite_costs = C[np.isfinite(C)]
-        self.cost_min = float(cmin) if cmin is not None else (float(np.min(finite_costs)) if finite_costs.size else 0.0)
-        self.cost_max = float(cmax) if cmax is not None else (float(np.max(finite_costs)) if finite_costs.size else 1.0)
+        if cmin is None:
+            self.cost_min = float(np.min(finite_costs)) if finite_costs.size else 0.0
+        else:
+            self.cost_min = float(cmin)
+        if cmax is None:
+            self.cost_max = float(np.max(finite_costs)) if finite_costs.size else 1.0
+        else:
+            self.cost_max = float(cmax)
         if self.cost_max <= self.cost_min:
             self.cost_max = self.cost_min + 1.0
 
@@ -387,8 +407,8 @@ class CERRouter(RouterBase):
         self.sample_dim = int(sample_features.shape[1])
         self.model_dim = int(model_profiles_std.shape[1])
 
-        pair_rows = int(n_samples * n_models)
         if self.verbose:
+            pair_rows = int(n_samples * n_models)
             print(
                 f"  CER train shape: N={n_samples}, K={n_models}, pair_rows={pair_rows}, "
                 f"sample_dim={self.sample_dim}, model_dim={self.model_dim}, ablation={self.ablation_mode}"
@@ -425,10 +445,11 @@ class CERRouter(RouterBase):
         best_epoch = 0
         stale_epochs = 0
         alpha_brier = self._effective_alpha_brier()
-        if monitor_output_dir is not None:
-            Path(monitor_output_dir).mkdir(parents=True, exist_ok=True)
         beta_rank = self._effective_beta_rank()
         beta_route_ce = self._effective_beta_route_ce()
+
+        if monitor_output_dir is not None:
+            Path(monitor_output_dir).mkdir(parents=True, exist_ok=True)
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
@@ -443,6 +464,7 @@ class CERRouter(RouterBase):
                 pair_ids = pair_ids.long()
                 sample_idx = torch.div(pair_ids, n_models, rounding_mode="floor")
                 model_idx = pair_ids.remainder(n_models)
+
                 labels = fail_tensor_cpu[sample_idx, model_idx].to(self.device, non_blocking=True)
                 sample_batch = sample_tensor_cpu[sample_idx].to(self.device, non_blocking=True)
                 profile_batch = profile_tensor_cpu[model_idx].to(self.device, non_blocking=True)
@@ -452,6 +474,7 @@ class CERRouter(RouterBase):
                 bce_loss = bce(logits, labels)
                 probs = torch.sigmoid(logits)
                 brier_loss = torch.mean((probs - labels) ** 2)
+
                 rank_loss, route_ce_loss = self._auxiliary_losses_for_batch(
                     sample_idx=sample_idx,
                     sample_tensor_cpu=sample_tensor_cpu,
@@ -506,7 +529,7 @@ class CERRouter(RouterBase):
                 best_metric = metric
                 best_epoch = epoch
                 stale_epochs = 0
-                best_state = copy.deepcopy({k: v.detach().cpu() for k, v in self.model.state_dict().items()})
+                best_state = copy.deepcopy({key: value.detach().cpu() for key, value in self.model.state_dict().items()})
                 if monitor_output_dir is not None:
                     torch.save(best_state, Path(monitor_output_dir) / "best_risk_net_state.pt")
             else:
@@ -548,14 +571,15 @@ class CERRouter(RouterBase):
         targets = np.zeros(Y.shape[0], dtype=np.int64)
         for row_idx in range(Y.shape[0]):
             row_cost = C[row_idx]
-            correct = np.where(Y[row_idx] > 0.5)[0]
             finite = np.isfinite(row_cost)
+            correct = np.where(Y[row_idx] > 0.5)[0]
             if correct.size:
                 correct = correct[finite[correct]]
             if correct.size:
                 targets[row_idx] = int(correct[np.argmin(row_cost[correct])])
             elif finite.any():
-                targets[row_idx] = int(np.where(finite)[0][np.argmin(row_cost[finite])])
+                finite_idx = np.where(finite)[0]
+                targets[row_idx] = int(finite_idx[np.argmin(row_cost[finite])])
             else:
                 targets[row_idx] = 0
         return targets
@@ -570,11 +594,11 @@ class CERRouter(RouterBase):
     ):
         sample_block = sample_tensor_cpu[unique_samples].to(self.device, non_blocking=True)
         profile_block = profile_tensor_cpu.to(self.device, non_blocking=True)
-        sample_expanded = sample_block[:, None, :].expand(-1, n_models, -1).reshape(-1, sample_block.shape[1])
-        profile_expanded = profile_block[None, :, :].expand(sample_block.shape[0], -1, -1).reshape(
-            -1,
-            profile_block.shape[1],
-        )
+        sample_expanded = sample_block[:, None, :].expand(-1, n_models, -1)
+        sample_expanded = sample_expanded.reshape(-1, sample_block.shape[1])
+        profile_expanded = profile_block[None, :, :].expand(sample_block.shape[0], -1, -1)
+        profile_expanded = profile_expanded.reshape(-1, profile_block.shape[1])
+
         logits = self.model(sample_expanded, profile_expanded).reshape(sample_block.shape[0], n_models)
         risks = torch.sigmoid(logits)
         norm_costs = norm_cost_tensor_cpu[unique_samples].to(self.device, non_blocking=True)
@@ -628,7 +652,8 @@ class CERRouter(RouterBase):
                         continue
                     b_pos = torch.randint(model_b_choices.numel(), (1,), device=self.device)
                     model_b = int(model_b_choices[b_pos].item())
-                    rank_terms.append(torch.relu(scores[row_idx, model_a] + self.rank_margin - scores[row_idx, model_b]))
+                    term = torch.relu(scores[row_idx, model_a] + self.rank_margin - scores[row_idx, model_b])
+                    rank_terms.append(term)
             if rank_terms:
                 rank_loss = torch.stack(rank_terms).mean()
 
@@ -643,12 +668,21 @@ class CERRouter(RouterBase):
         metric = self.monitor_metric
         if metric == "loss":
             return -float(dev_metrics.get("brier", math.inf))
-        if metric in ("brier", "ECE", "ece", "failure_auc"):
-            value = float(dev_metrics.get(metric, math.inf))
-            return -value if metric in ("brier", "ECE", "ece") else value
+        if metric in ("brier", "ECE", "ece"):
+            return -float(dev_metrics.get(metric, math.inf))
+        if metric == "failure_auc":
+            return float(dev_metrics.get(metric, -math.inf))
         return float(dev_metrics.get(metric, -math.inf))
 
-    def _evaluate_dev(self, X_text_dev, X_vision_dev, meta_dev, Y_dev, C_dev, rank_score_beta: float = 0.1):
+    def _evaluate_dev(
+        self,
+        X_text_dev,
+        X_vision_dev,
+        meta_dev,
+        Y_dev,
+        C_dev,
+        rank_score_beta: float = 0.1,
+    ):
         risks = self.predict_risk_matrix(X_text=X_text_dev, X_vision=X_vision_dev, meta=meta_dev)
         preds = self.predict(X_text=X_text_dev, X_vision=X_vision_dev, meta=meta_dev, C=C_dev)
         return accuracy_cost_summary(
@@ -695,16 +729,20 @@ class CERRouter(RouterBase):
         if profiles.shape[1] != self.model_dim:
             raise ValueError(f"profile dim mismatch: got {profiles.shape[1]}, expected {self.model_dim}")
 
-        batch_size = int(batch_size or max(1, min(512, self.batch_size // max(n_models, 1))))
+        default_batch = max(1, min(512, self.batch_size // max(n_models, 1)))
+        batch_size = int(batch_size or default_batch)
         risks = np.zeros((n_samples, n_models), dtype=np.float32)
         profile_tensor = torch.as_tensor(profiles, dtype=torch.float32, device=self.device)
+
         self.model.eval()
         with torch.no_grad():
             for start in range(0, n_samples, batch_size):
                 end = min(start + batch_size, n_samples)
                 sample_tensor = torch.as_tensor(sample_features[start:end], dtype=torch.float32, device=self.device)
-                sample_expanded = sample_tensor[:, None, :].expand(-1, n_models, -1).reshape(-1, sample_tensor.shape[1])
-                profile_expanded = profile_tensor[None, :, :].expand(end - start, -1, -1).reshape(-1, profile_tensor.shape[1])
+                sample_expanded = sample_tensor[:, None, :].expand(-1, n_models, -1)
+                sample_expanded = sample_expanded.reshape(-1, sample_tensor.shape[1])
+                profile_expanded = profile_tensor[None, :, :].expand(end - start, -1, -1)
+                profile_expanded = profile_expanded.reshape(-1, profile_tensor.shape[1])
                 logits = self.model(sample_expanded, profile_expanded).reshape(end - start, n_models)
                 risks[start:end] = torch.sigmoid(logits).detach().cpu().numpy()
         return risks
@@ -722,7 +760,12 @@ class CERRouter(RouterBase):
 
         lambda_cost = self._effective_lambda(kwargs.pop("lambda_cost", None))
         batch_size = kwargs.pop("batch_size", None)
-        risks = self.predict_risk_matrix(X_text=X_text, X_vision=X_vision, meta=meta, batch_size=batch_size)
+        risks = self.predict_risk_matrix(
+            X_text=X_text,
+            X_vision=X_vision,
+            meta=meta,
+            batch_size=batch_size,
+        )
         scores = risks
         if C is not None:
             C_arr = np.asarray(C, dtype=np.float32)
@@ -733,7 +776,7 @@ class CERRouter(RouterBase):
             scores = risks + lambda_cost * self._normalize_cost_matrix(C_arr)
         return np.argmin(scores, axis=1).astype(int)
 
-    def save(self, path: str | Path):
+    def save(self, path: str | Path) -> None:
         if self.model is None:
             raise RuntimeError("Cannot save an unfitted CERRouter")
         path = Path(path)
@@ -747,8 +790,6 @@ class CERRouter(RouterBase):
                 "batch_size": self.batch_size,
                 "epochs": self.epochs,
                 "alpha_brier": self.alpha_brier,
-                "pairwise_rank_weight": self.pairwise_rank_weight,
-                "pairwise_rank_margin": self.pairwise_rank_margin,
                 "beta_rank": self.beta_rank,
                 "rank_margin": self.rank_margin,
                 "rank_pairs_per_sample": self.rank_pairs_per_sample,
@@ -797,7 +838,7 @@ class CERRouter(RouterBase):
         router.model_mapping = payload.get("model_mapping")
         router.reverse_mapping = payload.get("reverse_mapping")
         if router.reverse_mapping is None and router.model_mapping:
-            router.reverse_mapping = {v: k for k, v in router.model_mapping.items()}
+            router.reverse_mapping = {value: key for key, value in router.model_mapping.items()}
         router.costs = payload.get("costs")
         router.sample_mean = payload.get("sample_mean")
         router.sample_std = payload.get("sample_std")
@@ -822,8 +863,9 @@ class CERRouter(RouterBase):
         router.model.eval()
         return router
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"CERRouter(hidden_dim={self.hidden_dim}, lambda_cost={self.lambda_cost}, "
-            f"alpha_brier={self.alpha_brier}, ablation_mode='{self.ablation_mode}')"
+            f"alpha_brier={self.alpha_brier}, beta_rank={self.beta_rank}, "
+            f"beta_route_ce={self.beta_route_ce}, ablation_mode='{self.ablation_mode}')"
         )

@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+PYTHON_BIN="${PYTHON:-python}"
 FEATURE_CSV="outputs/features/counterfactual_evidence_features.csv"
 OUTPUT_BASE="outputs/cer_generalization"
 HELDOUT_TASKS="${HELDOUT_TASKS:-}"
@@ -38,10 +39,15 @@ while [ "$#" -gt 0 ]; do
 done
 
 echo "Available query_type values in this dataset:"
-python - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 from pathlib import Path
-import pandas as pd
-from routers.cer.features import parse_query_type
+
+try:
+    import pandas as pd
+    from routers.cer.features import parse_query_type
+except Exception as exc:
+    print(f"  unavailable: {exc}")
+    raise SystemExit(0)
 
 path = Path("data/registry/meta.parquet")
 if not path.exists():
@@ -57,7 +63,7 @@ else:
 PY
 
 echo "Available model list:"
-python - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 import pickle
 
@@ -82,7 +88,7 @@ run_full() {
   local split_mode="$1"
   local output_dir="$2"
   shift 2
-  python routers/cer/train_and_eval.py \
+  "$PYTHON_BIN" routers/cer/train_and_eval.py \
     --dataset_dir . \
     --output_dir "$output_dir" \
     --text_encoder BAAI/bge-m3 \

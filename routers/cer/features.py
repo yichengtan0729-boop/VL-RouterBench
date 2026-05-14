@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Feature builders for CER-Router."""
+"""Feature builders shared by CER Lite and CER Full."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ try:
 
     HAS_PANDAS = True
     PANDAS_IMPORT_ERROR = None
-except Exception as exc:  # pragma: no cover - exercised only in broken envs
+except Exception as exc:  # pragma: no cover - depends on local binary packages
     pd = None
     HAS_PANDAS = False
     PANDAS_IMPORT_ERROR = exc
@@ -43,7 +43,8 @@ TEXT_FIELDS: Tuple[str, ...] = (
 )
 
 
-def require_pandas():
+def require_pandas() -> None:
+    """Raise a clear error when pandas-backed metadata is required."""
     if not HAS_PANDAS:
         raise ImportError(f"CER metadata handling requires pandas: {PANDAS_IMPORT_ERROR}")
 
@@ -60,22 +61,23 @@ def _is_missing(value: Any) -> bool:
 
 
 def safe_text(value: Any) -> str:
+    """Convert common missing values to an empty string."""
     if _is_missing(value):
         return ""
     return str(value)
 
 
 def _fallback_sample_ids(n_samples: int) -> List[str]:
-    return [f"sample_{i}" for i in range(int(n_samples))]
+    return [f"sample_{idx}" for idx in range(int(n_samples))]
 
 
 def coerce_meta(meta: Any, n_samples: int) -> Tuple[List[Dict[str, Any]], Any]:
     """
-    Return metadata rows plus a pandas DataFrame when pandas is available.
+    Return metadata rows and, when pandas is available, a DataFrame.
 
-    Missing or short metadata is padded conservatively. If sample_id is absent,
-    deterministic fallback ids are added so downstream joins and prediction
-    files keep working.
+    The function is intentionally forgiving: missing metadata is padded,
+    overlong metadata is truncated, and absent sample ids get deterministic
+    fallback values. This keeps smoke tests and ablations simple.
     """
     n_samples = int(n_samples)
 
@@ -96,13 +98,13 @@ def coerce_meta(meta: Any, n_samples: int) -> Tuple[List[Dict[str, Any]], Any]:
             else:
                 meta_df = meta_df.reindex(range(n_samples)).copy()
 
+        fallback_ids = _fallback_sample_ids(n_samples)
         if "sample_id" not in meta_df.columns:
-            meta_df["sample_id"] = _fallback_sample_ids(n_samples)
+            meta_df["sample_id"] = fallback_ids
         else:
-            fallback_ids = _fallback_sample_ids(n_samples)
             meta_df["sample_id"] = [
-                fallback_ids[i] if _is_missing(value) or safe_text(value) == "" else value
-                for i, value in enumerate(meta_df["sample_id"].tolist())
+                fallback_ids[idx] if _is_missing(value) or safe_text(value) == "" else safe_text(value)
+                for idx, value in enumerate(meta_df["sample_id"].tolist())
             ]
 
         if "dataset" not in meta_df.columns:
@@ -119,11 +121,11 @@ def coerce_meta(meta: Any, n_samples: int) -> Tuple[List[Dict[str, Any]], Any]:
             except Exception:
                 rows.append({})
     elif isinstance(meta, dict):
-        for i in range(n_samples):
-            row = {}
+        for idx in range(n_samples):
+            row: Dict[str, Any] = {}
             for key, value in meta.items():
-                if isinstance(value, (list, tuple, np.ndarray)) and len(value) > i:
-                    row[key] = value[i]
+                if isinstance(value, (list, tuple, np.ndarray)) and len(value) > idx:
+                    row[key] = value[idx]
                 else:
                     row[key] = value
             rows.append(row)
@@ -132,16 +134,17 @@ def coerce_meta(meta: Any, n_samples: int) -> Tuple[List[Dict[str, Any]], Any]:
         rows.extend({} for _ in range(n_samples - len(rows)))
 
     fallback_ids = _fallback_sample_ids(n_samples)
-    for i, row in enumerate(rows):
-        if "sample_id" not in row or safe_text(row.get("sample_id")) == "":
-            row["sample_id"] = fallback_ids[i]
+    for idx, row in enumerate(rows):
+        if safe_text(row.get("sample_id", "")) == "":
+            row["sample_id"] = fallback_ids[idx]
         if "dataset" not in row:
             row["dataset"] = ""
+
     return rows[:n_samples], None
 
 
 def ensure_meta_frame(meta: Any, n_samples: int):
-    """Return a pandas DataFrame with sample_id/dataset fallbacks."""
+    """Return a pandas DataFrame with sample_id and dataset fallbacks."""
     require_pandas()
     _, meta_df = coerce_meta(meta, n_samples=n_samples)
     return meta_df
@@ -151,8 +154,7 @@ def parse_query_type(meta_row: Any) -> str:
     """
     Infer a coarse query type from common text fields and dataset names.
 
-    Supported labels are: ocr, counting, spatial, chart, fine_grained, stem,
-    and general. The parser is heuristic by design and falls back to general.
+    The parser is heuristic by design and falls back to ``general``.
     """
     if meta_row is None:
         return "general"
@@ -322,7 +324,7 @@ def _load_extra_features(
     if "sample_id" not in extra_df.columns:
         warnings.warn("extra_feature_csv has no sample_id column; filling extra features with zeros")
         if feature_columns is None:
-            columns = [col for col in extra_df.select_dtypes(include=[np.number]).columns if col != "sample_id"]
+            columns = [col for col in extra_df.select_dtypes(include=[np.number]).columns]
         else:
             columns = list(feature_columns)
         return np.zeros((n_samples, len(columns)), dtype=np.float32), columns
@@ -331,9 +333,9 @@ def _load_extra_features(
         columns = [col for col in extra_df.select_dtypes(include=[np.number]).columns if col != "sample_id"]
     else:
         columns = list(feature_columns)
-        for col in columns:
-            if col not in extra_df.columns:
-                extra_df[col] = 0.0
+        for column in columns:
+            if column not in extra_df.columns:
+                extra_df[column] = 0.0
 
     if not columns:
         return np.zeros((n_samples, 0), dtype=np.float32), []
@@ -367,9 +369,9 @@ def build_sample_features(
     """
     Build sample-side CER features.
 
-    Full mode includes normalized text embeddings, normalized vision
-    embeddings, image-text cosine similarity, text norm, vision norm, norm gap,
-    query_type one-hot, and optional sample_id-aligned extra features.
+    The feature vector includes normalized text and vision embeddings, scalar
+    alignment/norm features, optional query-type one-hot features, and optional
+    sample-id-aligned extra features.
     """
     X_text = np.asarray(X_text, dtype=np.float32)
     X_vision = np.asarray(X_vision, dtype=np.float32)
@@ -406,8 +408,8 @@ def build_sample_features(
     query_types = [parse_query_type(row) for row in rows]
     if include_query_type:
         query_one_hot = np.zeros((n_samples, len(QUERY_TYPES)), dtype=np.float32)
-        for i, query_type in enumerate(query_types):
-            query_one_hot[i, QUERY_TYPE_TO_ID.get(query_type, QUERY_TYPE_TO_ID["general"])] = 1.0
+        for idx, query_type in enumerate(query_types):
+            query_one_hot[idx, QUERY_TYPE_TO_ID.get(query_type, QUERY_TYPE_TO_ID["general"])] = 1.0
         blocks.append(query_one_hot)
 
     extra_matrix, extra_columns = _load_extra_features(
@@ -443,8 +445,7 @@ def build_model_profiles(
     Build per-model profiles from training-set outcomes and costs.
 
     Full profiles contain global accuracy, global cost mean/std, and
-    query-type-conditioned accuracy/cost statistics. The no_model_profile
-    ablation uses a constant profile with the same interface.
+    query-type-conditioned accuracy/cost statistics.
     """
     Y = np.asarray(Y, dtype=np.float32)
     C = np.asarray(C, dtype=np.float32)
@@ -463,6 +464,7 @@ def build_model_profiles(
     if len(query_types) != n_samples:
         query_types = (query_types + ["general"] * n_samples)[:n_samples]
 
+    query_type_arr = np.asarray(query_types)
     profiles: List[List[float]] = []
     for model_idx in range(n_models):
         y_col = Y[:, model_idx]
@@ -478,7 +480,6 @@ def build_model_profiles(
 
         values = [global_acc, mean_cost, std_cost]
         if include_query_stats:
-            query_type_arr = np.asarray(query_types)
             for query_type in QUERY_TYPES:
                 mask = query_type_arr == query_type
                 if mask.any():

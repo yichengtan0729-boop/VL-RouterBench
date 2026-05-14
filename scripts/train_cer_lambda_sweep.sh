@@ -1,12 +1,14 @@
 #!/bin/bash
-# Train CER-Router over the default lambda_cost sweep.
+# Train CER Lite over the default lambda_cost sweep.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-python routers/cer/train_and_eval.py \
+PYTHON_BIN="${PYTHON:-python}"
+
+"$PYTHON_BIN" routers/cer/train_and_eval.py \
   --dataset_dir . \
   --output_dir outputs/cer_router \
   --text_encoder BAAI/bge-m3 \
@@ -20,7 +22,8 @@ python routers/cer/train_and_eval.py \
   --epochs 30 \
   --alpha_brier 0.3 \
   --beta_rank 0.0 \
-  --beta_route_ce 0.0 \
+  --rank_margin 0.05 \
   --rank_pairs_per_sample 0 \
+  --beta_route_ce 0.0 \
   --enable_dev \
   "$@"

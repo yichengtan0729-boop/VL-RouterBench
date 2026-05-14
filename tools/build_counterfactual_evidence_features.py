@@ -177,7 +177,9 @@ def resolve_local_path(uri: str, dataset_dir: Path) -> Optional[Path]:
 
 
 class TsvImageCache:
-    def __init__(self):
+    """Small TSV image loader with frame-level caching."""
+
+    def __init__(self) -> None:
         self.frames: Dict[str, pd.DataFrame] = {}
 
     def _load_frame(self, path: Path) -> pd.DataFrame:
@@ -284,7 +286,7 @@ def text_like_mask(image: Any, use_ocr_boxes: bool = False, row: Optional[Dict[s
     masked = image.copy()
     draw = ImageDraw.Draw(masked)
     width, height = masked.size
-    fill = tuple(int(v) for v in np.asarray(masked).reshape(-1, 3).mean(axis=0))
+    fill = tuple(int(value) for value in np.asarray(masked).reshape(-1, 3).mean(axis=0))
 
     boxes = []
     if use_ocr_boxes and row is not None:
@@ -295,7 +297,7 @@ def text_like_mask(image: Any, use_ocr_boxes: bool = False, row: Optional[Dict[s
     if boxes:
         for box in boxes:
             try:
-                x0, y0, x1, y1 = [int(float(v)) for v in box[:4]]
+                x0, y0, x1, y1 = [int(float(value)) for value in box[:4]]
                 draw.rectangle((x0, y0, x1, y1), fill=fill)
             except Exception:
                 continue
@@ -311,7 +313,7 @@ def chart_region_mask(image: Any) -> Any:
     masked = image.copy()
     draw = ImageDraw.Draw(masked)
     width, height = masked.size
-    fill = tuple(int(v) for v in np.asarray(masked).reshape(-1, 3).mean(axis=0))
+    fill = tuple(int(value) for value in np.asarray(masked).reshape(-1, 3).mean(axis=0))
     draw.rectangle((0, int(height * 0.82), width, height), fill=fill)
     draw.rectangle((0, 0, int(width * 0.16), height), fill=fill)
     return masked
@@ -338,7 +340,7 @@ def random_mask(image: Any, seed: int) -> Any:
     perturbed = image.copy()
     draw = ImageDraw.Draw(perturbed)
     width, height = image.size
-    fill = tuple(int(v) for v in np.asarray(image).reshape(-1, 3).mean(axis=0))
+    fill = tuple(int(value) for value in np.asarray(image).reshape(-1, 3).mean(axis=0))
     for _ in range(3):
         x0 = int(rng.uniform(0.0, 0.75) * width)
         y0 = int(rng.uniform(0.0, 0.75) * height)
@@ -431,7 +433,6 @@ def image_counterfactual_features(
     perturb_encoder: Optional[Any] = None,
 ) -> Dict[str, float]:
     image = resize_square(image, image_size)
-
     blur = image.filter(ImageFilter.GaussianBlur(radius=1.4))
     crop = center_crop_resize(image, 0.84, image.size)
     lowres = lowres_image(image, factor=4)
@@ -440,7 +441,6 @@ def image_counterfactual_features(
     counting_like = object_density_proxy(center_crop_resize(image.filter(ImageFilter.GaussianBlur(radius=0.7)), 0.78, image.size))
     spatial_like = background_perturb(center_crop_resize(image, 0.82, image.size))
 
-    random_values = []
     sample_id = row.get("sample_id", "")
     random_images = []
     for salt in ("r0", "r1", "r2"):
@@ -453,38 +453,36 @@ def image_counterfactual_features(
                 [image, blur, crop, lowres, ocr_like, chart_like, counting_like, spatial_like, *random_images]
             )
             base_vec = encoded[0]
-            generic_blur_dist = embedding_distance(base_vec, encoded[1])
-            generic_crop_dist = embedding_distance(base_vec, encoded[2])
-            lowres_dist = embedding_distance(base_vec, encoded[3])
-            ocr_like_dist = embedding_distance(base_vec, encoded[4])
-            chart_like_dist = embedding_distance(base_vec, encoded[5])
-            counting_like_dist = embedding_distance(base_vec, encoded[6])
-            spatial_like_dist = embedding_distance(base_vec, encoded[7])
             random_values = [embedding_distance(base_vec, vector) for vector in encoded[8:]]
+            features = {
+                "generic_blur_dist": embedding_distance(base_vec, encoded[1]),
+                "generic_crop_dist": embedding_distance(base_vec, encoded[2]),
+                "lowres_dist": embedding_distance(base_vec, encoded[3]),
+                "random_perturb_mean": float(np.mean(random_values)) if random_values else 0.0,
+                "ocr_like_dist": embedding_distance(base_vec, encoded[4]),
+                "chart_like_dist": embedding_distance(base_vec, encoded[5]),
+                "counting_like_dist": embedding_distance(base_vec, encoded[6]),
+                "spatial_like_dist": embedding_distance(base_vec, encoded[7]),
+            }
         except Exception:
-            perturb_encoder = None
+            features = {}
+    else:
+        features = {}
 
-    if perturb_encoder is None:
+    if not features:
         base = image_descriptor(image)
-        generic_blur_dist = descriptor_distance(base, image_descriptor(blur))
-        generic_crop_dist = descriptor_distance(base, image_descriptor(crop))
-        lowres_dist = descriptor_distance(base, image_descriptor(lowres))
-        ocr_like_dist = descriptor_distance(base, image_descriptor(ocr_like))
-        chart_like_dist = descriptor_distance(base, image_descriptor(chart_like))
-        counting_like_dist = descriptor_distance(base, image_descriptor(counting_like))
-        spatial_like_dist = descriptor_distance(base, image_descriptor(spatial_like))
         random_values = [descriptor_distance(base, image_descriptor(random_image)) for random_image in random_images]
+        features = {
+            "generic_blur_dist": descriptor_distance(base, image_descriptor(blur)),
+            "generic_crop_dist": descriptor_distance(base, image_descriptor(crop)),
+            "lowres_dist": descriptor_distance(base, image_descriptor(lowres)),
+            "random_perturb_mean": float(np.mean(random_values)) if random_values else 0.0,
+            "ocr_like_dist": descriptor_distance(base, image_descriptor(ocr_like)),
+            "chart_like_dist": descriptor_distance(base, image_descriptor(chart_like)),
+            "counting_like_dist": descriptor_distance(base, image_descriptor(counting_like)),
+            "spatial_like_dist": descriptor_distance(base, image_descriptor(spatial_like)),
+        }
 
-    features = {
-        "generic_blur_dist": generic_blur_dist,
-        "generic_crop_dist": generic_crop_dist,
-        "lowres_dist": lowres_dist,
-        "random_perturb_mean": float(np.mean(random_values)) if random_values else 0.0,
-        "ocr_like_dist": ocr_like_dist,
-        "chart_like_dist": chart_like_dist,
-        "counting_like_dist": counting_like_dist,
-        "spatial_like_dist": spatial_like_dist,
-    }
     query_type = parse_query_type(row)
     mean_value, max_value, std_value = query_conditioned_stats(query_type, features)
     features.update(
@@ -560,7 +558,6 @@ def embedding_proxy_features(
         "counting_like_dist": 0.10 + 0.22 * text_stats["counting_terms"] + 0.08 * text_stats["digit_ratio"] + 0.05 * spread,
         "spatial_like_dist": 0.10 + 0.22 * text_stats["spatial_terms"] + 0.08 * cross_gap + 0.04 * mean_abs,
     }
-
     mean_value, max_value, std_value = query_conditioned_stats(query_type, features)
     features.update(
         {
@@ -590,8 +587,8 @@ def build_row_features(
 
     if image is not None:
         features = image_counterfactual_features(
-            row,
-            image,
+            row=row,
+            image=image,
             image_size=image_size,
             use_ocr_boxes=use_ocr_boxes,
             perturb_encoder=perturb_encoder,
@@ -641,7 +638,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--perturb_encoder",
         default="descriptor",
         choices=["descriptor", "vision"],
-        help="Use fast image descriptors or the configured vision encoder for perturbation distances",
+        help="Use fast descriptors or the configured vision encoder for perturbation distances",
     )
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-samples", "--max_samples", type=int, default=None)
@@ -674,9 +671,9 @@ def main() -> None:
 
     complete_mask = complete_cache_rows(cache_df)
     cached_ids = set(cache_df.loc[complete_mask, "sample_id"].astype(str).tolist()) if not args.force else set()
-
     selected_ids = meta["sample_id"].astype(str).tolist()
     todo_ids = [sample_id for sample_id in selected_ids if sample_id not in cached_ids]
+
     print("=" * 80)
     print("Building CER counterfactual evidence features")
     print("=" * 80)
@@ -701,8 +698,7 @@ def main() -> None:
     vision_embeddings = load_embedding_map(vision_path)
     print(f"text_embeddings: {len(text_embeddings)} from {text_path}")
     print(f"vision_embeddings: {len(vision_embeddings)} from {vision_path}")
-    if not HAS_PIL:
-        print("Warning: pillow is unavailable; falling back to embedding/metadata proxy features.")
+
     perturb_encoder = None
     if args.perturb_encoder == "vision" and HAS_PIL:
         try:
@@ -716,11 +712,14 @@ def main() -> None:
     else:
         print("perturb_encoder: descriptor")
 
+    if not HAS_PIL:
+        print("Warning: pillow is unavailable; falling back to embedding/metadata proxy features.")
+
     benchmark_records = load_benchmark_metadata(dataset_dir)
     tsv_cache = TsvImageCache()
     todo_set = set(todo_ids)
     new_rows: List[Dict[str, Any]] = []
-    for idx, (_, meta_row) in enumerate(meta.iterrows(), start=1):
+    for _, meta_row in meta.iterrows():
         sample_id = safe_text(meta_row.get("sample_id", ""))
         if sample_id not in todo_set:
             continue

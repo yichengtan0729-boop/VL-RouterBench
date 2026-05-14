@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Experimental split helpers for CER-Router."""
+"""Split helpers for CER experiments."""
 
 from __future__ import annotations
 
@@ -11,12 +11,14 @@ from routers.cer.features import coerce_meta, get_query_types, safe_text
 
 
 def parse_list(values: Optional[Iterable[str] | str]) -> List[str]:
+    """Parse comma- or whitespace-separated command line lists."""
     if values is None:
         return []
     if isinstance(values, str):
         raw_values = [values]
     else:
         raw_values = list(values)
+
     parsed: List[str] = []
     for value in raw_values:
         for piece in str(value).replace(",", " ").split():
@@ -30,7 +32,7 @@ def _standard_sample_splits(data: Dict[str, Any]) -> Dict[str, List[Any]]:
     splits = data.get("splits", {}) or {}
     meta = data.get("meta")
     n_samples = len(meta) if meta is not None else len(data.get("sample_ids", []))
-    rows, meta_df = coerce_meta(meta, n_samples=n_samples)
+    rows, _ = coerce_meta(meta, n_samples=n_samples)
     all_ids = [row["sample_id"] for row in rows]
 
     train_ids = list(splits.get("train", [])) or all_ids
@@ -65,18 +67,12 @@ def make_sample_splits(
     heldout_tasks: Optional[Iterable[str] | str] = None,
     heldout_datasets: Optional[Iterable[str] | str] = None,
 ) -> Dict[str, Any]:
-    """
-    Create sample split ids for standard and conservative heldout modes.
-
-    Standard split is returned untouched. Heldout modes filter the existing
-    train/dev splits away from the heldout ids and evaluate on heldout ids in
-    the existing test split when possible.
-    """
+    """Create sample split ids for standard and heldout modes."""
     split_mode = str(split_mode or "standard")
     standard = _standard_sample_splits(data)
     notes: List[str] = []
 
-    if split_mode == "standard" or split_mode == "heldout_model":
+    if split_mode in ("standard", "heldout_model"):
         return {"splits": standard, "notes": notes}
 
     meta = data.get("meta")
@@ -107,6 +103,7 @@ def make_sample_splits(
     train_ids = [sid for sid in standard["train"] if sid not in heldout_ids]
     dev_ids = [sid for sid in standard["dev"] if sid not in heldout_ids]
     test_ids = [sid for sid in standard["test"] if sid in heldout_ids]
+
     if not test_ids:
         test_ids = list(heldout_ids)
         notes.append(f"{split_mode}: no heldout ids in standard test; using all matched heldout ids as test")
@@ -121,6 +118,7 @@ def make_sample_splits(
 
 
 def make_model_split(models: List[str], heldout_models: Optional[Iterable[str] | str] = None) -> Dict[str, Any]:
+    """Create train/eval model index lists."""
     wanted = parse_list(heldout_models)
     n_models = len(models)
     if not wanted:
@@ -142,7 +140,6 @@ def make_model_split(models: List[str], heldout_models: Optional[Iterable[str] |
     notes: List[str] = []
     if not heldout:
         notes.append("heldout_model requested but no models matched; using all models for training")
-        heldout = []
 
     train_indices = [idx for idx in range(n_models) if idx not in set(heldout)]
     if not train_indices:
@@ -165,6 +162,7 @@ def resolve_experiment_splits(
     heldout_datasets: Optional[Iterable[str] | str] = None,
     heldout_models: Optional[Iterable[str] | str] = None,
 ) -> Dict[str, Any]:
+    """Resolve sample and model splits for one experiment."""
     sample_info = make_sample_splits(
         data=data,
         split_mode=split_mode,
@@ -187,6 +185,7 @@ def resolve_experiment_splits(
 
 
 def choose_calibration_indices(n_samples: int, calibration_size: int, seed: int = 42) -> np.ndarray:
+    """Choose deterministic calibration rows for heldout-model profiles."""
     n_samples = int(n_samples)
     calibration_size = int(calibration_size)
     if calibration_size <= 0 or n_samples <= 0:

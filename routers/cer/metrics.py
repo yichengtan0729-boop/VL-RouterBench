@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Metrics for CER-Router experiments."""
+"""Metrics for CER routing experiments."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from routers.utils.rank_score import rank_score
 
 
 def normalize_cost_matrix(C: np.ndarray, cmin: float, cmax: float) -> np.ndarray:
+    """Normalize costs to [0, 1] with robust NaN handling."""
     C_arr = np.asarray(C, dtype=np.float32)
     if cmax <= cmin:
         return np.zeros_like(C_arr, dtype=np.float32)
@@ -53,25 +54,6 @@ def expected_calibration_error(labels: np.ndarray, probabilities: np.ndarray, n_
     return float(ece)
 
 
-def risk_coverage_auc(correct: np.ndarray, selected_risks: np.ndarray) -> float:
-    """Area under selective accuracy as low-risk predictions are admitted."""
-    correct = np.asarray(correct, dtype=np.float32).reshape(-1)
-    selected_risks = np.asarray(selected_risks, dtype=np.float32).reshape(-1)
-    finite = np.isfinite(correct) & np.isfinite(selected_risks)
-    correct = correct[finite]
-    selected_risks = selected_risks[finite]
-    if correct.size == 0:
-        return float("nan")
-
-    order = np.argsort(selected_risks, kind="mergesort")
-    sorted_correct = correct[order]
-    cumulative_accuracy = np.cumsum(sorted_correct) / np.arange(1, sorted_correct.size + 1)
-    coverage = np.arange(1, sorted_correct.size + 1, dtype=np.float32) / float(sorted_correct.size)
-    coverage = np.concatenate([[0.0], coverage])
-    cumulative_accuracy = np.concatenate([[float(cumulative_accuracy[0])], cumulative_accuracy])
-    return float(np.trapz(cumulative_accuracy, coverage))
-
-
 def failure_auc(labels: np.ndarray, probabilities: np.ndarray) -> float:
     """AUC for binary failure labels using averaged ranks for ties."""
     labels = np.asarray(labels).reshape(-1)
@@ -98,7 +80,54 @@ def failure_auc(labels: np.ndarray, probabilities: np.ndarray) -> float:
         start = end
 
     pos_rank_sum = float(ranks[labels == 1].sum())
-    return float((pos_rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+    auc = (pos_rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    return float(auc)
+
+
+def risk_coverage_auc(correct: np.ndarray, selected_risks: np.ndarray) -> float:
+    """Area under selective accuracy as low-risk predictions are admitted."""
+    correct = np.asarray(correct, dtype=np.float32).reshape(-1)
+    selected_risks = np.asarray(selected_risks, dtype=np.float32).reshape(-1)
+    finite = np.isfinite(correct) & np.isfinite(selected_risks)
+    correct = correct[finite]
+    selected_risks = selected_risks[finite]
+    if correct.size == 0:
+        return float("nan")
+
+    order = np.argsort(selected_risks, kind="mergesort")
+    sorted_correct = correct[order]
+    cumulative_accuracy = np.cumsum(sorted_correct) / np.arange(1, sorted_correct.size + 1)
+    coverage = np.arange(1, sorted_correct.size + 1, dtype=np.float32) / float(sorted_correct.size)
+    coverage = np.concatenate([[0.0], coverage])
+    cumulative_accuracy = np.concatenate([[float(cumulative_accuracy[0])], cumulative_accuracy])
+    return float(np.trapz(cumulative_accuracy, coverage))
+
+
+def oracle_routing(Y: np.ndarray, C: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    """Route to the cheapest correct model, falling back to cheapest model."""
+    Y = np.asarray(Y)
+    C = np.asarray(C, dtype=np.float32)
+    if Y.shape != C.shape or Y.ndim != 2:
+        raise ValueError(f"Y and C must be 2D arrays with the same shape; got {Y.shape} and {C.shape}")
+
+    preds = np.zeros(Y.shape[0], dtype=int)
+    for row_idx in range(Y.shape[0]):
+        row_cost = C[row_idx]
+        correct = np.where(Y[row_idx] == 1)[0]
+        finite = np.isfinite(row_cost)
+        if correct.size:
+            correct = correct[finite[correct]]
+        if correct.size:
+            preds[row_idx] = int(correct[np.argmin(row_cost[correct])])
+        elif finite.any():
+            finite_idx = np.where(finite)[0]
+            preds[row_idx] = int(finite_idx[np.argmin(row_cost[finite])])
+        else:
+            preds[row_idx] = 0
+
+    correct_values = Y[np.arange(Y.shape[0]), preds].astype(float)
+    cost_values = C[np.arange(Y.shape[0]), preds].astype(float)
+    return preds, float(np.nanmean(correct_values)), float(np.nanmean(cost_values))
 
 
 def _coerce_frontier_arrays(baseline_frontier: Optional[Any]) -> Tuple[np.ndarray, np.ndarray]:
@@ -113,13 +142,13 @@ def _coerce_frontier_arrays(baseline_frontier: Optional[Any]) -> Tuple[np.ndarra
     else:
         rows = baseline_frontier
 
-    costs = []
-    accuracies = []
     if isinstance(rows, dict):
         cost_values = rows.get("avg_cost", rows.get("cost", []))
         acc_values = rows.get("accuracy", rows.get("acc", []))
-        rows = [{"avg_cost": c, "accuracy": a} for c, a in zip(cost_values, acc_values)]
+        rows = [{"avg_cost": cost, "accuracy": acc} for cost, acc in zip(cost_values, acc_values)]
 
+    costs = []
+    accuracies = []
     for row in rows or []:
         if not isinstance(row, dict):
             continue
@@ -142,13 +171,7 @@ def baseline_frontier_match_metrics(
     avg_cost: float,
     baseline_frontier: Optional[Any] = None,
 ) -> Dict[str, float]:
-    """
-    Compare one router point against an accuracy/cost baseline frontier.
-
-    matched_cost_accuracy is the best baseline accuracy at no higher average
-    cost. matched_accuracy_cost_reduction is the relative cost reduction versus
-    the cheapest baseline point that reaches at least this router accuracy.
-    """
+    """Compare a router point against a baseline accuracy/cost frontier."""
     costs, accuracies = _coerce_frontier_arrays(baseline_frontier)
     if costs.size == 0:
         return {
@@ -176,27 +199,6 @@ def baseline_frontier_match_metrics(
         "matched_cost_accuracy": matched_cost_accuracy,
         "matched_accuracy_cost_reduction": cost_reduction,
     }
-
-
-def oracle_routing(Y: np.ndarray, C: np.ndarray) -> Tuple[np.ndarray, float, float]:
-    """Route to the cheapest correct model, falling back to cheapest model."""
-    Y = np.asarray(Y)
-    C = np.asarray(C, dtype=np.float32)
-    if Y.shape != C.shape or Y.ndim != 2:
-        raise ValueError(f"Y and C must be 2D arrays with the same shape; got {Y.shape} and {C.shape}")
-
-    preds = np.zeros(Y.shape[0], dtype=int)
-    for i in range(Y.shape[0]):
-        correct = np.where(Y[i] == 1)[0]
-        if correct.size:
-            costs = C[i, correct]
-            preds[i] = int(correct[np.nanargmin(costs)])
-        else:
-            preds[i] = int(np.nanargmin(C[i]))
-
-    correct_values = Y[np.arange(Y.shape[0]), preds].astype(float)
-    cost_values = C[np.arange(Y.shape[0]), preds].astype(float)
-    return preds, float(np.nanmean(correct_values)), float(np.nanmean(cost_values))
 
 
 def accuracy_cost_summary(
@@ -255,7 +257,10 @@ def accuracy_cost_summary(
     if risks is not None:
         fail_labels = (1.0 - Y).astype(np.float32)
         risks_arr = np.asarray(risks, dtype=np.float32)
-        selected_risks = risks_arr[row_ids, preds] if risks_arr.shape == Y.shape else np.array([], dtype=np.float32)
+        if risks_arr.shape == Y.shape:
+            selected_risks = risks_arr[row_ids, preds]
+        else:
+            selected_risks = np.array([], dtype=np.float32)
         ece = expected_calibration_error(fail_labels, risks_arr, n_bins=ece_bins)
         result.update(
             {

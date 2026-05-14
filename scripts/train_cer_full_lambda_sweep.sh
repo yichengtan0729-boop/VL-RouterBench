@@ -1,11 +1,12 @@
 #!/bin/bash
-# Train CER-Full: counterfactual evidence features + cost-aware ranking + route CE.
+# Train CER-Full: evidence features + cost-aware ranking + route CE.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+PYTHON_BIN="${PYTHON:-python}"
 FEATURE_CSV="outputs/features/counterfactual_evidence_features.csv"
 OUTPUT_DIR="outputs/cer_router_full"
 
@@ -32,7 +33,7 @@ if [ ! -f "$FEATURE_CSV" ]; then
   exit 2
 fi
 
-python routers/cer/train_and_eval.py \
+"$PYTHON_BIN" routers/cer/train_and_eval.py \
   --dataset_dir . \
   --output_dir "$OUTPUT_DIR" \
   --text_encoder BAAI/bge-m3 \

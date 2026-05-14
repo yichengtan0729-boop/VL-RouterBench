@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+PYTHON_BIN="${PYTHON:-python}"
 FEATURE_CSV="outputs/features/counterfactual_evidence_features.csv"
 OUTPUT_BASE="outputs"
 COMMON_ARGS=()
@@ -47,7 +48,7 @@ MODES=(
 for mode in "${MODES[@]}"; do
   out_dir="$OUTPUT_BASE/ablation_${mode}"
   echo "Running CER ablation: $mode -> $out_dir"
-  python routers/cer/train_and_eval.py \
+  "$PYTHON_BIN" routers/cer/train_and_eval.py \
     --dataset_dir . \
     --output_dir "$out_dir" \
     --text_encoder BAAI/bge-m3 \

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import random
@@ -12,16 +13,39 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from routers.cer.experiment_splits import choose_calibration_indices, parse_list, resolve_experiment_splits
-from routers.cer.features import ensure_meta_frame, parse_query_type
+from routers.cer.features import coerce_meta, parse_query_type
 from routers.cer.metrics import accuracy_cost_summary, normalize_cost_matrix
 from routers.cer.router import ABLATION_MODES, CERRouter
 from routers.utils.rank_score import get_cost_bounds_from_config
-from routers.utils.train_utils import align_train_data, load_data_for_training
+
+
+SUMMARY_COLUMNS: List[str] = [
+    "router",
+    "seed",
+    "split",
+    "ablation_mode",
+    "split_mode",
+    "lambda_cost",
+    "accuracy",
+    "avg_cost",
+    "total_cost",
+    "rank_score",
+    "oracle_accuracy",
+    "oracle_avg_cost",
+    "oracle_gap",
+    "failure_auc",
+    "brier",
+    "ece",
+    "risk_coverage_auc",
+    "num_samples",
+    "num_correct",
+    "checkpoint",
+    "pred_path",
+]
 
 
 def parse_lambda_list(values: Iterable[str]) -> List[float]:
@@ -39,7 +63,7 @@ def lambda_tag(value: float) -> str:
     return str(value).replace("+", "").replace("-", "neg").replace(".", "_")
 
 
-def set_seed(seed: int):
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     try:
@@ -77,6 +101,10 @@ def find_missing_dataset_artifacts(dataset_dir: Path, text_encoder: str, vision_
     return missing
 
 
+def is_smoke_output(output_dir: Path) -> bool:
+    return "smoke" in str(output_dir).replace("\\", "/").lower()
+
+
 def load_cost_bounds(dataset_dir: Path, C: np.ndarray) -> Tuple[float, float, str]:
     cost_bounds_file = dataset_dir / "data/matrices/cost_bounds.json"
     try:
@@ -93,20 +121,127 @@ def load_cost_bounds(dataset_dir: Path, C: np.ndarray) -> Tuple[float, float, st
         return cmin, cmax, "fallback_C_min_max"
 
 
+def make_synthetic_data(seed: int = 42, n_samples: int = 256, n_models: int = 5) -> Dict[str, Any]:
+    """Create a tiny deterministic dataset for local smoke tests when artifacts are absent."""
+    rng = np.random.default_rng(int(seed))
+    sample_ids = [f"smoke_{idx:04d}" for idx in range(n_samples)]
+    query_types = ["ocr", "chart", "counting", "spatial", "general"]
+    meta = []
+    for idx, sample_id in enumerate(sample_ids):
+        query_type = query_types[idx % len(query_types)]
+        meta.append(
+            {
+                "sample_id": sample_id,
+                "dataset": f"synthetic_{query_type}",
+                "question": f"synthetic {query_type} routing sample {idx}",
+            }
+        )
+
+    text_embeddings = rng.normal(size=(n_samples, 32)).astype(np.float32)
+    vision_embeddings = rng.normal(size=(n_samples, 32)).astype(np.float32)
+    difficulty = rng.normal(size=(n_samples, 1)).astype(np.float32)
+    model_skill = np.linspace(0.20, 1.15, n_models, dtype=np.float32).reshape(1, n_models)
+    logits = model_skill - 0.35 * difficulty + rng.normal(scale=0.25, size=(n_samples, n_models))
+    probabilities = 1.0 / (1.0 + np.exp(-logits))
+    Y = (rng.random(size=(n_samples, n_models)) < probabilities).astype(np.float32)
+    Y[:, -1] = np.maximum(Y[:, -1], (rng.random(n_samples) < 0.72).astype(np.float32))
+
+    base_cost = np.linspace(0.0004, 0.006, n_models, dtype=np.float32).reshape(1, n_models)
+    sample_cost_scale = 1.0 + 0.15 * rng.random(size=(n_samples, 1)).astype(np.float32)
+    C = (base_cost * sample_cost_scale).astype(np.float32)
+
+    train_end = int(n_samples * 0.70)
+    dev_end = int(n_samples * 0.82)
+    splits = {
+        "train": sample_ids[:train_end],
+        "dev": sample_ids[train_end:dev_end],
+        "test": sample_ids[dev_end:],
+    }
+    return {
+        "Y": Y,
+        "C": C,
+        "meta": meta,
+        "models": [f"synthetic_model_{idx}" for idx in range(n_models)],
+        "text_embeddings": text_embeddings,
+        "vision_embeddings": vision_embeddings,
+        "sample_ids": np.asarray(sample_ids),
+        "splits": splits,
+        "synthetic": True,
+    }
+
+
+def load_training_data(args) -> Tuple[Dict[str, Any], float, float, str, List[str]]:
+    dataset_dir = Path(args.dataset_dir)
+    output_dir = Path(args.output_dir)
+    missing = find_missing_dataset_artifacts(dataset_dir, args.text_encoder, args.vision_encoder)
+    if missing:
+        if is_smoke_output(output_dir):
+            print("Missing dataset artifacts; using deterministic synthetic smoke data:")
+            for item in missing:
+                print(f"  - {item}")
+            data = make_synthetic_data(seed=int(args.seed))
+            cmin, cmax, _ = load_cost_bounds(dataset_dir, data["C"])
+            return data, cmin, cmax, "synthetic_smoke", missing
+        print("Missing required dataset artifacts:")
+        for item in missing:
+            print(f"  - {item}")
+        print("Build matrices and embeddings first; no data will be downloaded by this script.")
+        raise SystemExit(2)
+
+    from routers.utils.train_utils import load_data_for_training
+
+    data = load_data_for_training(
+        dataset_dir,
+        text_encoder=args.text_encoder,
+        vision_encoder=args.vision_encoder,
+    )
+    cmin, cmax, cost_bounds_source = load_cost_bounds(dataset_dir, data["C"])
+    data["synthetic"] = False
+    return data, cmin, cmax, cost_bounds_source, []
+
+
 def make_model_mapping(models: List[str], model_indices: List[int]) -> Dict[int, str]:
     return {relative_idx: models[source_idx] for relative_idx, source_idx in enumerate(model_indices)}
+
+
+def _iloc_meta(meta: Any, indices: np.ndarray):
+    if hasattr(meta, "iloc"):
+        return meta.iloc[indices].reset_index(drop=True).copy()
+    return [meta[int(idx)] for idx in indices]
 
 
 def aligned_split(data: Dict[str, Any], split_name: str, sample_ids: Iterable[Any], model_indices: List[int]):
     ids = set(sample_ids)
     if not ids:
         return None
+
+    if data.get("synthetic"):
+        sample_id_arr = np.asarray(data["sample_ids"])
+        selected = np.asarray([idx for idx, sample_id in enumerate(sample_id_arr) if sample_id in ids], dtype=int)
+        if selected.size == 0:
+            return None
+        model_indices_arr = np.asarray(model_indices, dtype=int)
+        return {
+            "name": split_name,
+            "X_text": data["text_embeddings"][selected],
+            "X_vision": data["vision_embeddings"][selected],
+            "Y": data["Y"][selected][:, model_indices_arr],
+            "C": data["C"][selected][:, model_indices_arr],
+            "Y_full": data["Y"][selected],
+            "C_full": data["C"][selected],
+            "meta": _iloc_meta(data["meta"], selected),
+            "meta_indices": selected,
+            "embedding_indices": selected,
+            "model_indices": list(model_indices),
+        }
+
+    from routers.utils.train_utils import align_train_data
+
     X_text, X_vision, Y, C, meta, meta_indices, embedding_indices = align_train_data(data, ids)
     if len(meta) == 0:
         return None
-
     model_indices_arr = np.asarray(model_indices, dtype=int)
-    split = {
+    return {
         "name": split_name,
         "X_text": X_text,
         "X_vision": X_vision,
@@ -119,7 +254,6 @@ def aligned_split(data: Dict[str, Any], split_name: str, sample_ids: Iterable[An
         "embedding_indices": embedding_indices,
         "model_indices": list(model_indices),
     }
-    return split
 
 
 def build_eval_profiles(
@@ -138,14 +272,14 @@ def build_eval_profiles(
     eval_profiles = router.build_raw_model_profiles(Y_profile, C_profile, meta=meta_profile)
 
     if heldout_model_indices:
-        eval_index_to_relative = {source_idx: i for i, source_idx in enumerate(eval_model_indices)}
+        eval_index_to_relative = {source_idx: idx for idx, source_idx in enumerate(eval_model_indices)}
         heldout_relative = [eval_index_to_relative[idx] for idx in heldout_model_indices if idx in eval_index_to_relative]
         seen_relative = [eval_index_to_relative[idx] for idx in train_model_indices if idx in eval_index_to_relative]
 
         if profile_calibration_size > 0:
             calibration_idx = choose_calibration_indices(len(meta_profile), profile_calibration_size, seed=seed)
             if calibration_idx.size:
-                calibration_meta = meta_profile.iloc[calibration_idx].reset_index(drop=True)
+                calibration_meta = _iloc_meta(meta_profile, calibration_idx)
                 calibration_profiles = router.build_raw_model_profiles(
                     Y_profile[calibration_idx],
                     C_profile[calibration_idx],
@@ -158,6 +292,124 @@ def build_eval_profiles(
             for relative_idx in heldout_relative:
                 eval_profiles[relative_idx] = mean_seen_profile
     return eval_profiles.astype(np.float32)
+
+
+def safe_float(value: Any, default: float = float("nan")) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def load_baseline_frontier(path: Optional[str | Path]) -> Optional[List[Dict[str, float]]]:
+    if not path:
+        return None
+    baseline_path = Path(path)
+    if not baseline_path.exists():
+        print(f"Warning: baseline summary not found, skipping frontier comparison: {baseline_path}")
+        return None
+
+    rows: List[Dict[str, Any]] = []
+    with baseline_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if str(row.get("router", "")).lower() == "oracle":
+                continue
+            accuracy = safe_float(row.get("accuracy"))
+            avg_cost = safe_float(row.get("avg_cost"))
+            if math.isfinite(accuracy) and math.isfinite(avg_cost):
+                rows.append(
+                    {
+                        "router": row.get("router", "baseline"),
+                        "accuracy": accuracy,
+                        "avg_cost": avg_cost,
+                        "rank_score": safe_float(row.get("rank_score")),
+                    }
+                )
+
+    rows.sort(key=lambda item: (item["avg_cost"], -item["accuracy"]))
+    frontier: List[Dict[str, float]] = []
+    best_accuracy = -math.inf
+    for row in rows:
+        if row["accuracy"] > best_accuracy + 1e-12:
+            frontier.append(row)
+            best_accuracy = row["accuracy"]
+
+    if frontier:
+        print(f"Loaded {len(frontier)} baseline frontier points from {baseline_path}")
+    return frontier or None
+
+
+def rows_to_csv(path: Path, rows: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if columns is None:
+        columns = []
+        seen = set()
+        for row in rows:
+            for key in row.keys():
+                if key not in seen:
+                    columns.append(key)
+                    seen.add(key)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def build_frontier_rows(
+    summary_rows: List[Dict[str, Any]],
+    baseline_frontier: Optional[List[Dict[str, float]]] = None,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for row in summary_rows:
+        rows.append(
+            {
+                "source": "cer",
+                "router": row.get("router", "cer"),
+                "seed": row.get("seed", ""),
+                "lambda_cost": row.get("lambda_cost", ""),
+                "ablation_mode": row.get("ablation_mode", ""),
+                "split": row.get("split", ""),
+                "accuracy": row.get("accuracy", ""),
+                "avg_cost": row.get("avg_cost", ""),
+                "total_cost": row.get("total_cost", ""),
+                "rank_score": row.get("rank_score", ""),
+                "oracle_gap": row.get("oracle_gap", ""),
+            }
+        )
+    for row in baseline_frontier or []:
+        rows.append(
+            {
+                "source": "baseline",
+                "router": row.get("router", "baseline"),
+                "seed": "",
+                "lambda_cost": "",
+                "ablation_mode": "",
+                "split": "test",
+                "accuracy": row.get("accuracy", ""),
+                "avg_cost": row.get("avg_cost", ""),
+                "total_cost": "",
+                "rank_score": row.get("rank_score", ""),
+                "oracle_gap": "",
+            }
+        )
+
+    rows.sort(key=lambda item: (safe_float(item.get("avg_cost"), math.inf), -safe_float(item.get("accuracy"), -math.inf)))
+    best_accuracy = -math.inf
+    for row in rows:
+        accuracy = safe_float(row.get("accuracy"), -math.inf)
+        keep = math.isfinite(accuracy) and accuracy > best_accuracy + 1e-12
+        row["is_frontier"] = int(keep)
+        if keep:
+            best_accuracy = accuracy
+    return rows
+
+
+def meta_rows(meta: Any, n_samples: int) -> List[Dict[str, Any]]:
+    rows, _ = coerce_meta(meta, n_samples=n_samples)
+    return rows
 
 
 def evaluate_cer_router(
@@ -177,10 +429,10 @@ def evaluate_cer_router(
     X_vision = split["X_vision"]
     Y = np.asarray(split["Y"])
     C = np.asarray(split["C"])
-    meta = ensure_meta_frame(split["meta"], n_samples=len(split["meta"]))
+    rows = meta_rows(split["meta"], n_samples=len(Y))
 
-    risks = router.predict_risk_matrix(X_text=X_text, X_vision=X_vision, meta=meta)
-    preds = router.predict(X_text=X_text, X_vision=X_vision, meta=meta, C=C)
+    risks = router.predict_risk_matrix(X_text=X_text, X_vision=X_vision, meta=split["meta"])
+    preds = router.predict(X_text=X_text, X_vision=X_vision, meta=split["meta"], C=C)
     metrics = accuracy_cost_summary(
         preds=preds,
         Y=Y,
@@ -199,34 +451,33 @@ def evaluate_cer_router(
         np.save(risk_matrix_path, risks)
 
     if pred_path is not None:
-        pred_path.parent.mkdir(parents=True, exist_ok=True)
-        row_ids = np.arange(len(preds))
-        correct = Y[row_ids, preds].astype(int)
-        selected_costs = C[row_ids, preds].astype(float)
         norm_costs = normalize_cost_matrix(C, cmin=cmin, cmax=cmax)
+        row_ids = np.arange(len(preds))
         selected_risks = risks[row_ids, preds]
         selected_norm_costs = norm_costs[row_ids, preds]
+        selected_costs = C[row_ids, preds].astype(float)
+        correct = Y[row_ids, preds].astype(int)
         lambda_cost = router._effective_lambda()
-        source_model_indices = [split["model_indices"][int(pred)] for pred in preds]
-        pred_model_names = [model_names[source_idx] for source_idx in source_model_indices]
-        datasets = meta["dataset"].tolist() if "dataset" in meta.columns else [""] * len(preds)
-        query_types = [parse_query_type(row) for _, row in meta.iterrows()]
-        pd.DataFrame(
-            {
-                "sample_id": meta["sample_id"].tolist(),
-                "dataset": datasets,
-                "query_type": query_types,
-                "pred_model_idx": preds,
-                "source_model_idx": source_model_indices,
-                "pred_model": pred_model_names,
-                "correct": correct,
-                "cost": selected_costs,
-                "cost_with_router_overhead": selected_costs + float(router_overhead_cost),
-                "failure_risk": selected_risks,
-                "normalized_cost": selected_norm_costs,
-                "route_score": selected_risks + lambda_cost * selected_norm_costs,
-            }
-        ).to_csv(pred_path, index=False)
+        pred_rows = []
+        for idx, pred in enumerate(preds):
+            source_model_idx = split["model_indices"][int(pred)]
+            pred_rows.append(
+                {
+                    "sample_id": rows[idx].get("sample_id", f"sample_{idx}"),
+                    "dataset": rows[idx].get("dataset", ""),
+                    "query_type": parse_query_type(rows[idx]),
+                    "pred_model_idx": int(pred),
+                    "source_model_idx": int(source_model_idx),
+                    "pred_model": model_names[source_model_idx],
+                    "correct": int(correct[idx]),
+                    "cost": float(selected_costs[idx]),
+                    "cost_with_router_overhead": float(selected_costs[idx] + router_overhead_cost),
+                    "failure_risk": float(selected_risks[idx]),
+                    "normalized_cost": float(selected_norm_costs[idx]),
+                    "route_score": float(selected_risks[idx] + lambda_cost * selected_norm_costs[idx]),
+                }
+            )
+        rows_to_csv(pred_path, pred_rows)
 
     return metrics
 
@@ -248,116 +499,6 @@ def to_jsonable(obj):
     if isinstance(obj, Path):
         return str(obj)
     return obj
-
-
-def load_baseline_frontier(path: Optional[str | Path]) -> Optional[List[Dict[str, float]]]:
-    if not path:
-        return None
-    baseline_path = Path(path)
-    if not baseline_path.exists():
-        print(f"Warning: baseline summary not found, skipping frontier comparison: {baseline_path}")
-        return None
-    try:
-        df = pd.read_csv(baseline_path)
-    except Exception as exc:
-        print(f"Warning: failed to read baseline summary {baseline_path}: {exc}")
-        return None
-
-    required = {"accuracy", "avg_cost"}
-    if not required.issubset(set(df.columns)):
-        print(f"Warning: baseline summary lacks columns {sorted(required)}; skipping frontier comparison")
-        return None
-
-    if "router" in df.columns:
-        df = df[df["router"].astype(str).str.lower() != "oracle"].copy()
-    df["accuracy"] = pd.to_numeric(df["accuracy"], errors="coerce")
-    df["avg_cost"] = pd.to_numeric(df["avg_cost"], errors="coerce")
-    df = df[np.isfinite(df["accuracy"]) & np.isfinite(df["avg_cost"])]
-    if df.empty:
-        print("Warning: baseline summary has no finite non-oracle frontier rows")
-        return None
-
-    df = df.sort_values(["avg_cost", "accuracy"], ascending=[True, False])
-    frontier_rows = []
-    best_accuracy = -math.inf
-    for _, row in df.iterrows():
-        accuracy = float(row["accuracy"])
-        avg_cost = float(row["avg_cost"])
-        if accuracy > best_accuracy + 1e-12:
-            try:
-                rank_score_value = float(row.get("rank_score", float("nan")))
-            except (TypeError, ValueError):
-                rank_score_value = float("nan")
-            frontier_rows.append(
-                {
-                    "router": str(row.get("router", "baseline")),
-                    "accuracy": accuracy,
-                    "avg_cost": avg_cost,
-                    "rank_score": rank_score_value,
-                }
-            )
-            best_accuracy = accuracy
-
-    print(f"Loaded {len(frontier_rows)} baseline frontier points from {baseline_path}")
-    return frontier_rows or None
-
-
-def build_frontier_summary(
-    summary_rows: List[Dict[str, Any]],
-    baseline_frontier: Optional[List[Dict[str, float]]] = None,
-) -> pd.DataFrame:
-    rows: List[Dict[str, Any]] = []
-    for row in summary_rows:
-        rows.append(
-            {
-                "source": "cer",
-                "router": row.get("router", "cer"),
-                "seed": row.get("seed"),
-                "lambda_cost": row.get("lambda_cost"),
-                "ablation_mode": row.get("ablation_mode"),
-                "split": row.get("split"),
-                "accuracy": row.get("accuracy"),
-                "avg_cost": row.get("avg_cost"),
-                "total_cost": row.get("total_cost"),
-                "rank_score": row.get("rank_score"),
-                "oracle_gap": row.get("oracle_gap"),
-            }
-        )
-    for row in baseline_frontier or []:
-        rows.append(
-            {
-                "source": "baseline",
-                "router": row.get("router", "baseline"),
-                "seed": "",
-                "lambda_cost": "",
-                "ablation_mode": "",
-                "split": "test",
-                "accuracy": row.get("accuracy"),
-                "avg_cost": row.get("avg_cost"),
-                "total_cost": float("nan"),
-                "rank_score": row.get("rank_score"),
-                "oracle_gap": float("nan"),
-            }
-        )
-
-    frontier_df = pd.DataFrame(rows)
-    if frontier_df.empty:
-        return frontier_df
-
-    frontier_df = frontier_df.sort_values(["avg_cost", "accuracy"], ascending=[True, False]).reset_index(drop=True)
-    best_accuracy = -math.inf
-    is_frontier = []
-    for _, row in frontier_df.iterrows():
-        try:
-            accuracy = float(row["accuracy"])
-        except (TypeError, ValueError):
-            accuracy = float("nan")
-        keep = np.isfinite(accuracy) and accuracy > best_accuracy + 1e-12
-        is_frontier.append(bool(keep))
-        if keep:
-            best_accuracy = accuracy
-    frontier_df["is_frontier"] = is_frontier
-    return frontier_df
 
 
 def run_one_seed(
@@ -394,18 +535,18 @@ def run_one_seed(
         print("Warning: --enable_dev requested but no aligned dev split was found; dev monitoring disabled")
 
     eval_splits = [split for split in [train_eval_split, dev_eval_split, test_eval_split] if split is not None]
-    if not eval_splits:
-        eval_splits = [train_eval_split] if train_eval_split is not None else []
+    if not eval_splits and train_eval_split is not None:
+        eval_splits = [train_eval_split]
     primary_split = test_eval_split or dev_eval_split or train_eval_split
     if primary_split is None:
         raise ValueError("No aligned evaluation samples found")
 
     print(f"seed={seed}")
-    print(f"  train samples: {len(train_fit_split['meta'])}, train models: {len(train_model_indices)}")
+    print(f"  train samples: {len(train_fit_split['Y'])}, train models: {len(train_model_indices)}")
     if dev_fit_split is not None:
-        print(f"  dev samples: {len(dev_fit_split['meta'])}")
+        print(f"  dev samples: {len(dev_fit_split['Y'])}")
     if test_eval_split is not None:
-        print(f"  test samples: {len(test_eval_split['meta'])}")
+        print(f"  test samples: {len(test_eval_split['Y'])}")
     if heldout_model_indices:
         heldout_names = [models[idx] for idx in heldout_model_indices]
         print(f"  heldout models: {heldout_names}")
@@ -575,7 +716,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--monitor_metric",
         "--monitor-metric",
         default="rank_score",
-        choices=["rank_score", "accuracy", "brier", "ECE", "ece"],
+        choices=["rank_score", "accuracy", "brier", "ECE", "ece", "failure_auc"],
     )
     parser.add_argument("--rank_score_beta", "--rank-score-beta", type=float, default=0.1)
     parser.add_argument("--ece_bins", "--ece-bins", type=int, default=15)
@@ -630,20 +771,7 @@ def main():
         f"rank_pairs_per_sample: {args.rank_pairs_per_sample}, beta_route_ce: {args.beta_route_ce}"
     )
 
-    missing = find_missing_dataset_artifacts(dataset_dir, args.text_encoder, args.vision_encoder)
-    if missing:
-        print("Missing required dataset artifacts:")
-        for item in missing:
-            print(f"  - {item}")
-        print("Build matrices and embeddings first; no data will be downloaded by this script.")
-        raise SystemExit(2)
-
-    data = load_data_for_training(
-        dataset_dir,
-        text_encoder=args.text_encoder,
-        vision_encoder=args.vision_encoder,
-    )
-    cmin, cmax, cost_bounds_source = load_cost_bounds(dataset_dir, data["C"])
+    data, cmin, cmax, cost_bounds_source, missing = load_training_data(args)
     print(f"cost_bounds: cmin={cmin:.8f}, cmax={cmax:.8f}, source={cost_bounds_source}")
     baseline_frontier = load_baseline_frontier(args.baseline_summary)
 
@@ -675,44 +803,12 @@ def main():
         all_summary_rows.extend(seed_rows)
         seed_reports[str(seed)] = seed_report
 
-    summary_df = pd.DataFrame(all_summary_rows)
-    required_summary_columns = [
-        "lambda_cost",
-        "accuracy",
-        "avg_cost",
-        "total_cost",
-        "rank_score",
-        "oracle_accuracy",
-        "oracle_avg_cost",
-        "oracle_gap",
-        "failure_auc",
-        "brier",
-        "ece",
-        "risk_coverage_auc",
-        "num_samples",
-        "num_correct",
-    ]
-    for column in required_summary_columns:
-        if column not in summary_df.columns:
-            summary_df[column] = np.nan
-    leading_columns = [
-        "router",
-        "seed",
-        "split",
-        "ablation_mode",
-        "split_mode",
-        "checkpoint",
-        "pred_path",
-    ]
-    ordered_columns = [col for col in leading_columns + required_summary_columns if col in summary_df.columns]
-    ordered_columns.extend([col for col in summary_df.columns if col not in ordered_columns])
-    summary_df = summary_df.loc[:, ordered_columns]
     summary_csv = output_dir / "cer_summary.csv"
     summary_json = output_dir / "cer_summary.json"
     risk_metrics_json = output_dir / "risk_metrics.json"
     frontier_csv = output_dir / "frontier_summary.csv"
-    summary_df.to_csv(summary_csv, index=False)
-    build_frontier_summary(all_summary_rows, baseline_frontier=baseline_frontier).to_csv(frontier_csv, index=False)
+    rows_to_csv(summary_csv, all_summary_rows, columns=SUMMARY_COLUMNS)
+    rows_to_csv(frontier_csv, build_frontier_rows(all_summary_rows, baseline_frontier=baseline_frontier))
 
     report = {
         "router": "cer",
@@ -750,6 +846,8 @@ def main():
         "cost_bounds": {"cmin": cmin, "cmax": cmax, "source": cost_bounds_source},
         "lambda_list": lambdas,
         "seeds": seeds,
+        "synthetic": bool(data.get("synthetic", False)),
+        "missing_artifacts": missing,
         "baseline_frontier": baseline_frontier,
         "experiment_splits": experiment_info,
         "summary": all_summary_rows,
